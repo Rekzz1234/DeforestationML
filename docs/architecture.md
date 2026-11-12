@@ -1,48 +1,48 @@
 # System architecture
 
-## End-to-end flow
-
 ```text
-User polygon / prepared Earth Engine imagery
-                  |
-                  v
-       Sentinel-1 and Sentinel-2
-                  |
-                  v
-        Seasonal composites
-                  |
-                  v
-       Feature stack construction
-   VV, VH, ratio, optical bands, NDVI,
-       NBR, elevation, slope
-                  |
-          +-------+--------+
-          |                |
-          v                v
- Forest/non-forest RF   Historical loss labels
-          |                |
-          v                v
- Multi-date maps       Susceptibility RF
-          |                |
-          v                v
- Change detection     Temporal validation
-          |                |
-          +-------+--------+
-                  |
-                  v
-   GeoTIFFs, area statistics, risk map
+User-drawn AOI (geometry)
+          |
+          v
+Landsat 5/7 (1990–2010) + Landsat 8/9 (2015–2025)
+          |
+          v
+QA masking + SR scaling + Jan–Apr median composites
+          |
+          v
+10-band feature stack (6 SR bands, NDVI, NBR, elevation, slope)
+          |
+          +-------------------------------+
+          |                               |
+          v                               v
+WorldCover 2021 labels             Hansen loss-year labels
+          |                               |
+          v                               v
+Forest / non-forest RF             Susceptibility RF
+          |                         train 2010 / validate 2015
+          v                               |
+Classify 1990, 2000, 2010,               v
+2020 and 2025                         2025 risk outlook
+          |                               |
+          v                               v
+Forest transitions + hectares     Relative susceptibility map
+          |                               |
+          +---------------+---------------+
+                          |
+                          v
+                GeoTIFFs / report figures
 ```
 
 ## Model separation
 
-**Forest classification** answers: which pixels resemble the selected forest reference class?
+**Forest classification** estimates which pixels match the selected reference forest class.
 
-**Change detection** answers: which pixels changed from forest to non-forest between two classified dates?
+**Change detection** identifies pixels classified as forest at an earlier date and non-forest at a later date.
 
-**Risk prediction** answers: which eligible currently forested pixels have feature patterns associated with historical loss?
+**Susceptibility prediction** estimates relative similarity to historical loss examples within the eligible Hansen circa-2000 forest cohort.
 
-These are different tasks and their metrics must not be mixed.
+These tasks and their evaluation metrics must be reported separately.
 
-## Generalization
+## Generalization and temporal caveats
 
-The initial script retrains using reference samples within the selected area. This is convenient for a fast demonstration but is not proof of cross-region transfer. To demonstrate generalization, train on multiple regions and hold out an entire region for testing.
+The forest classifier is trained within the selected AOI using 2021 labels, then applied retrospectively. Landsat sensor and processing differences remain, and the 2021 reference is not ground truth for 1990. The Hansen loss product begins in 2001 and cannot validate the 1990–2000 interval. The initial risk model does not include post-2000 regrowth.

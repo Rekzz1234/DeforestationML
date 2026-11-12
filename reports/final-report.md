@@ -1,37 +1,22 @@
-# Deforestation Detection and Future Risk Prediction in the Tamil Nadu Western Ghats
+# Final project report (working template)
+
+## Title
+Long-term Landsat-based forest-cover change detection and deforestation susceptibility mapping in the Tamil Nadu Western Ghats (1990–2025)
 
 ## Abstract
-Pending execution and measured results.
+[Insert after running the Earth Engine workflow. Do not invent area estimates or accuracy values.]
 
-## 1. Introduction
-Describe forest monitoring, deforestation and the value of combining SAR and optical observations.
+## Study area
+[Insert selected polygon, coordinates, area and rationale.]
 
-## 2. Study Area
-Insert the exact AOI polygon, coordinates, area and ecological context.
+## Data and methods
+Landsat Collection 2 Level-2 surface reflectance composites for 1990, 2000, 2010, 2015, 2020, 2021 and 2025 were prepared using a consistent January–April seasonal window. A Random Forest classifier was trained with 2021 Landsat features and ESA WorldCover 2021 reference labels, then applied to the five comparison years. Forest-to-nonforest transitions were mapped for 1990–2000, 2000–2010, 2010–2020 and 2020–2025. Hansen Global Forest Change loss-year labels were used for reference comparison from 2001 onward and for a separate susceptibility model.
 
-## 3. Datasets
-Describe Sentinel-1, Sentinel-2, ESA WorldCover, Hansen Global Forest Change and SRTM.
+## Results
+[Insert measured forest area, transition area, confusion matrix and temporal validation metrics from the Earth Engine Console.]
 
-## 4. Methodology
-Describe preprocessing, feature extraction, forest classification, change detection and risk modelling.
+## Limitations
+The classifier uses 2021 reference labels retrospectively; Landsat sensor/processing differences remain. Hansen loss begins in 2001 and does not validate 1990–2000. Hansen represents stand-replacement tree-cover loss and the risk cohort excludes post-2000 regrowth. Risk outputs are relative susceptibility, not calibrated probabilities.
 
-## 5. Experimental Design
-Document date windows, sampling, train/test strategy and temporal validation.
-
-## 6. Results
-Insert only measured outputs:
-- Forest cover maps
-- Historical loss maps
-- Area statistics
-- Confusion matrices
-- Accuracy, precision, recall and F1
-- Future susceptibility map
-
-## 7. Discussion
-Discuss uncertainty, cloud gaps, forest reference-label limitations, spatial generalization and the distinction between susceptibility and guaranteed prediction.
-
-## 8. Conclusion
-Complete after the model has been executed and evaluated.
-
-## References
-List the official dataset documentation and relevant research papers.
+## Conclusion
+[Write after inspecting the exported maps and measured results.]

@@ -1,190 +1,153 @@
 /***********************************************************************
- WESTERN GHATS FOREST MONITORING
- Sentinel-1 + Sentinel-2 + Random Forest
+ WESTERN GHATS DEFORESTATION MONITORING — LANDSAT 1990–2025
  Google Earth Engine Code Editor (JavaScript)
 
- FEATURES
- 1) Train a forest/non-forest RF model using ESA WorldCover 2021 labels.
- 2) Classify 2018, 2021 and 2024 composites.
- 3) Detect forest -> non-forest transitions.
- 4) Train a deforestation susceptibility RF model using Hansen loss:
-      train: 2018 predictors -> loss in 2019-2021
-      validate: 2021 predictors -> loss in 2022-2024
- 5) Predict susceptibility for 2026-2028 using 2026 predictors.
- 6) Export maps to Google Drive.
+ HISTORICAL CLASSIFICATION YEARS: 1990, 2000, 2010, 2020, 2025
+ SUPPORT YEARS: 2015 (risk validation), 2021 (WorldCover training)
 
- IMPORTANT
- - Before running, draw/import a polygon and name it `geometry`.
- - This is a regional, automatically re-trained model: when you change
-   geometry, it samples WorldCover labels in that new area and trains again.
- - It is not a pretrained zero-shot model for every ecosystem.
- - Forest definition is tree cover (WorldCover class 10) plus mangroves (95).
- - Hansen loss is stand-replacement tree-cover loss, not every type of
-   degradation/selective logging.
- - Risk is susceptibility, not a guaranteed prediction of future clearing.
+ Landsat Collection 2 Level-2 SR, 30 m. Common spectral band names are
+ created across Landsat 5/7 and Landsat 8/9. All years use the same
+ January–April seasonal window.
+
+ IMPORTANT SCIENTIFIC NOTES
+ - WorldCover 2021 trains the regional forest classifier; that classifier
+   is applied retrospectively to earlier Landsat composites. This is not
+   equivalent to independently validated historical ground truth.
+ - Cross-sensor differences remain despite common band names and SR
+   scaling. Inspect maps and use caution interpreting small differences.
+ - Hansen GFC loss starts in 2001; it cannot validate 1990–2000 loss.
+ - Hansen loss is stand-replacement tree-cover loss, not all degradation.
+ - Risk scores are relative susceptibility, not calibrated probabilities.
+ - Draw/import a polygon named `geometry` before running.
 ***********************************************************************/
 
 // ======================== USER SETTINGS ==============================
-var roi = geometry;                 // Draw a polygon; imported name: geometry
-var exportFolder = 'Western_Ghats_Deforestation';
-var exportScale = 30;               // Common working scale for S1/S2 fusion
-var samplePerClass = 1500;          // Reduce to 500 if region is small
+var roi = geometry;
+var exportFolder = 'Western_Ghats_Deforestation_Landsat1990_2025';
+var exportScale = 30;
+var samplePerClass = 1500; // reduce to 500 for a small AOI
 var randomSeed = 42;
 var runExports = true;
 
-// Composite window: same seasonal window for all years.
-// Change only if the selected region has too few clear observations.
 var startMonth = 1;
 var startDay = 1;
 var endMonth = 5;
-var endDay = 1;
+var endDay = 1; // exclusive: Jan 1 through Apr 30
+
+var historicalYears = [1990, 2000, 2010, 2020, 2025];
+var supportYears = [2015, 2021];
+var allYears = [1990, 2000, 2010, 2015, 2020, 2021, 2025];
 
 Map.centerObject(roi, 9);
 Map.addLayer(roi, {color: 'yellow'}, 'Study area', true);
 
 // ======================== DATASETS ===================================
-var s1Collection = ee.ImageCollection('COPERNICUS/S1_GRD');
-var s2Collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED');
+var l5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2');
+var l7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2');
+var l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2');
+var l9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2');
 var worldCover = ee.ImageCollection('ESA/WorldCover/v200').first().select('Map');
-
-// Current Hansen release available in Earth Engine: loss years 2001-2025.
-// lossyear values 1..25 correspond to 2001..2025.
 var hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13');
 var treeCover2000 = hansen.select('treecover2000');
 var lossYear = hansen.select('lossyear');
 var dataMask = hansen.select('datamask');
-
 var dem = ee.Image('USGS/SRTMGL1_003').select('elevation');
 var slope = ee.Terrain.slope(dem).rename('slope');
 
-// ======================== SENTINEL-1 =================================
-function getS1(year) {
-  var start = ee.Date.fromYMD(year, startMonth, startDay);
-  var end = ee.Date.fromYMD(year, endMonth, endDay);
+// ======================== LANDSAT PREPROCESSING ======================
+// QA_PIXEL bits: fill=0, dilated cloud=1, cirrus=2, cloud=3,
+// cloud shadow=4, snow=5. QA_RADSAT removes saturated pixels.
+function maskAndScale(image, sourceBands, commonNames) {
+  var qa = image.select('QA_PIXEL');
+  var mask = qa.bitwiseAnd(1 << 0).eq(0)
+    .and(qa.bitwiseAnd(1 << 1).eq(0))
+    .and(qa.bitwiseAnd(1 << 2).eq(0))
+    .and(qa.bitwiseAnd(1 << 3).eq(0))
+    .and(qa.bitwiseAnd(1 << 4).eq(0))
+    .and(qa.bitwiseAnd(1 << 5).eq(0))
+    .and(image.select('QA_RADSAT').eq(0));
 
-  var col = s1Collection
-    .filterBounds(roi)
-    .filterDate(start, end)
-    .filter(ee.Filter.eq('instrumentMode', 'IW'))
-    .filter(ee.Filter.listContains(
-      'transmitterReceiverPolarisation', 'VV'))
-    .filter(ee.Filter.listContains(
-      'transmitterReceiverPolarisation', 'VH'))
-    .select(['VV', 'VH']);
-
-  print('Sentinel-1 scene count ' + year, col.size());
-
-  var med = col.median();
-  var diff = med.select('VV').subtract(med.select('VH'))
-    .rename('VV_minus_VH');
-
-  return med.addBands(diff).clip(roi);
+  var sr = image.select(sourceBands, commonNames)
+    .multiply(0.0000275).add(-0.2);
+  var ndvi = sr.normalizedDifference(['nir', 'red']).rename('NDVI');
+  var nbr = sr.normalizedDifference(['nir', 'swir2']).rename('NBR');
+  return sr.addBands(ndvi).addBands(nbr)
+    .updateMask(mask)
+    .copyProperties(image, ['system:time_start']);
 }
 
-// ======================== SENTINEL-2 =================================
-function maskS2(image) {
-  var scl = image.select('SCL');
-  // Remove saturated/defective, cloud shadow, cloud, cirrus and snow.
-  var mask = scl.neq(1)
-    .and(scl.neq(3))
-    .and(scl.neq(8))
-    .and(scl.neq(9))
-    .and(scl.neq(10))
-    .and(scl.neq(11));
-  return image.updateMask(mask);
-}
+var l57Bands = ['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B7'];
+var commonBands = ['blue','green','red','nir','swir1','swir2'];
+var l89Bands = ['SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7'];
 
-function getS2(year) {
-  var start = ee.Date.fromYMD(year, startMonth, startDay);
-  var end = ee.Date.fromYMD(year, endMonth, endDay);
+var l57Prepared = l5.merge(l7).map(function(img) {
+  return maskAndScale(img, l57Bands, commonBands);
+});
+var l89Prepared = l8.merge(l9).map(function(img) {
+  return maskAndScale(img, l89Bands, commonBands);
+});
 
-  var col = s2Collection
-    .filterBounds(roi)
-    .filterDate(start, end)
-    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 85))
-    .map(maskS2);
-
-  print('Sentinel-2 scene count ' + year, col.size());
-
-  var med = col.median().multiply(0.0001);
-  var ndvi = med.normalizedDifference(['B8', 'B4']).rename('NDVI');
-  var nbr = med.normalizedDifference(['B8', 'B12']).rename('NBR');
-
-  return med.select(['B2','B3','B4','B8','B11','B12'])
-    .addBands(ndvi)
-    .addBands(nbr)
-    .clip(roi);
-}
-
-// ======================== FUSED FEATURES ==============================
 var featureBands = [
-  'VV', 'VH', 'VV_minus_VH',
-  'B2', 'B3', 'B4', 'B8', 'B11', 'B12',
-  'NDVI', 'NBR', 'elevation', 'slope'
+  'blue','green','red','nir','swir1','swir2','NDVI','NBR',
+  'elevation','slope'
 ];
 
-function getFeatures(year) {
-  return getS1(year)
-    .addBands(getS2(year))
-    .addBands(dem.rename('elevation'))
+function getLandsatFeatures(year) {
+  var start = ee.Date.fromYMD(year, startMonth, startDay);
+  var end = ee.Date.fromYMD(year, endMonth, endDay);
+  // Landsat 5/7 before 2013; Landsat 8/9 from 2013 onward.
+  var collection = ee.ImageCollection(ee.Algorithms.If(
+    ee.Number(year).lt(2013), l57Prepared, l89Prepared));
+  var filtered = collection.filterBounds(roi).filterDate(start, end);
+  print('Landsat scenes ' + year, filtered.size());
+  var composite = filtered.median();
+  return composite.addBands(dem.rename('elevation'))
     .addBands(slope)
     .select(featureBands)
     .clip(roi);
 }
 
-var f2018 = getFeatures(2018);
-var f2021 = getFeatures(2021);
-var f2024 = getFeatures(2024);
-var f2026 = getFeatures(2026);
+var features = {};
+allYears.forEach(function(year) {
+  features[year] = getLandsatFeatures(year);
+});
 
-// Display input composites
-Map.addLayer(f2026, {
-  bands: ['B8','B4','B3'], min: 0.02, max: 0.40
-}, 'Sentinel-2 false colour 2026', false);
-Map.addLayer(f2026.select('VV'), {
-  min: -25, max: 0
-}, 'Sentinel-1 VV 2026', false);
-Map.addLayer(f2026.select('VH'), {
-  min: -32, max: -5
-}, 'Sentinel-1 VH 2026', false);
+// Display latest and baseline composites.
+Map.addLayer(features[1990], {
+  bands: ['nir','red','green'], min: 0.02, max: 0.45
+}, 'Landsat false colour 1990', false);
+Map.addLayer(features[2025], {
+  bands: ['nir','red','green'], min: 0.02, max: 0.45
+}, 'Landsat false colour 2025', false);
 
 // ======================== FOREST CLASSIFIER ===========================
-// WorldCover 2021: 10=tree cover, 95=mangroves.
-// Non-forest reference classes used: 20 shrubland, 30 grassland,
-// 40 cropland, 50 built-up, 60 bare/sparse vegetation.
-// Wetlands/water are excluded to avoid ambiguous labels.
+// ESA WorldCover 2021: 10=tree cover, 95=mangroves.
+// Selected non-forest classes: 20 shrubland, 30 grassland, 40 cropland,
+// 50 built-up, 60 bare/sparse vegetation. Other classes are excluded.
 var wc = worldCover.clip(roi);
 var forestRef = wc.eq(10).or(wc.eq(95));
-var nonForestRef = wc.eq(20)
-  .or(wc.eq(30))
-  .or(wc.eq(40))
-  .or(wc.eq(50))
-  .or(wc.eq(60));
+var nonForestRef = wc.eq(20).or(wc.eq(30)).or(wc.eq(40))
+  .or(wc.eq(50)).or(wc.eq(60));
+var forestLabel = ee.Image(0).where(forestRef, 1)
+  .rename('class').updateMask(forestRef.or(nonForestRef));
 
-var forestLabel = ee.Image(0)
-  .where(forestRef, 1)
-  .rename('class')
-  .updateMask(forestRef.or(nonForestRef));
-
-// Train using 2021 predictors to match WorldCover 2021 reference year.
-var forestSamples = f2021.addBands(forestLabel).stratifiedSample({
+// Train using Landsat 2021 features to align with WorldCover 2021 labels.
+var forestSamples = features[2021].addBands(forestLabel).stratifiedSample({
   numPoints: samplePerClass,
   classBand: 'class',
   region: roi,
   scale: exportScale,
-  classValues: [0, 1],
-  classPoints: [samplePerClass, samplePerClass],
+  classValues: [0,1],
+  classPoints: [samplePerClass,samplePerClass],
   seed: randomSeed,
   geometries: true,
   tileScale: 4
 });
-
 print('Forest training samples', forestSamples.size());
 
 var forestSplit = forestSamples.randomColumn('rand', randomSeed);
 var forestTrain = forestSplit.filter(ee.Filter.lt('rand', 0.7));
 var forestTest = forestSplit.filter(ee.Filter.gte('rand', 0.7));
-
 var forestRF = ee.Classifier.smileRandomForest({
   numberOfTrees: 200,
   minLeafPopulation: 2,
@@ -195,93 +158,89 @@ var forestRF = ee.Classifier.smileRandomForest({
   classProperty: 'class',
   inputProperties: featureBands
 });
-
 var forestTestPred = forestTest.classify(forestRF);
-var forestMatrix = forestTestPred.errorMatrix('class', 'classification');
+var forestMatrix = forestTestPred.errorMatrix('class','classification');
+print('FOREST confusion matrix', forestMatrix);
+print('FOREST overall accuracy', forestMatrix.accuracy());
+print('FOREST kappa', forestMatrix.kappa());
+print('FOREST producer accuracy', forestMatrix.producersAccuracy());
+print('FOREST consumer accuracy', forestMatrix.consumersAccuracy());
 
-print('FOREST CLASSIFIER confusion matrix', forestMatrix);
-print('FOREST CLASSIFIER overall accuracy', forestMatrix.accuracy());
-print('FOREST CLASSIFIER kappa', forestMatrix.kappa());
-print('FOREST CLASSIFIER producer accuracy', forestMatrix.producersAccuracy());
-print('FOREST CLASSIFIER consumer accuracy', forestMatrix.consumersAccuracy());
-
-// Apply the same 2021-trained classifier to all historical/current dates.
-var forest2018 = f2018.classify(forestRF).rename('forest_class');
-var forest2021 = f2021.classify(forestRF).rename('forest_class');
-var forest2024 = f2024.classify(forestRF).rename('forest_class');
-var forest2026 = f2026.classify(forestRF).rename('forest_class');
-
+var forestMaps = {};
 var forestVis = {min: 0, max: 1, palette: ['#d95f02','#238b45']};
-Map.addLayer(forest2018, forestVis, 'Forest / non-forest 2018', false);
-Map.addLayer(forest2021, forestVis, 'Forest / non-forest 2021', false);
-Map.addLayer(forest2024, forestVis, 'Forest / non-forest 2024', true);
-Map.addLayer(forest2026, forestVis, 'Forest / non-forest 2026', false);
+historicalYears.forEach(function(year) {
+  forestMaps[year] = features[year].classify(forestRF).rename('forest_class');
+  Map.addLayer(forestMaps[year], forestVis,
+    'Forest / non-forest ' + year, year === 2025);
+});
 
 // ======================== CHANGE DETECTION ============================
-// Pixel class 1 = forest; 0 = non-forest.
-// Only forest -> non-forest is counted as loss.
-var loss18_21 = forest2018.eq(1).and(forest2021.eq(0)).selfMask()
-  .rename('loss_2018_2021');
-var loss21_24 = forest2021.eq(1).and(forest2024.eq(0)).selfMask()
-  .rename('loss_2021_2024');
-var loss24_26 = forest2024.eq(1).and(forest2026.eq(0)).selfMask()
-  .rename('loss_2024_2026');
+function transitionLoss(oldYear, newYear) {
+  return forestMaps[oldYear].eq(1)
+    .and(forestMaps[newYear].eq(0))
+    .selfMask()
+    .rename('loss_' + oldYear + '_' + newYear);
+}
+var intervals = [[1990,2000],[2000,2010],[2010,2020],[2020,2025]];
+var lossMaps = {};
+intervals.forEach(function(pair) {
+  var key = pair[0] + '_' + pair[1];
+  lossMaps[key] = transitionLoss(pair[0], pair[1]);
+  Map.addLayer(lossMaps[key], {palette:['red']},
+    'ML forest-to-nonforest transition ' + key, true);
+});
 
-Map.addLayer(loss18_21, {palette:['red']}, 'ML forest loss 2018-2021');
-Map.addLayer(loss21_24, {palette:['orange']}, 'ML forest loss 2021-2024');
-Map.addLayer(loss24_26, {palette:['magenta']}, 'ML forest loss 2024-2026');
-
-// Hansen historical loss layers for independent reference/comparison.
-// Hansen is stand-replacement loss, not all degradation.
-var hansenLoss18_21 = lossYear.gte(18).and(lossYear.lte(21))
+// Hansen comparison is available only from 2001 onward.
+// lossyear 1=2001, 10=2010, 20=2020, 25=2025.
+var hansenLoss2001_2010 = lossYear.gte(1).and(lossYear.lte(10))
   .and(treeCover2000.gte(30)).selfMask().clip(roi);
-var hansenLoss22_24 = lossYear.gte(22).and(lossYear.lte(24))
+var hansenLoss2011_2020 = lossYear.gte(11).and(lossYear.lte(20))
   .and(treeCover2000.gte(30)).selfMask().clip(roi);
-Map.addLayer(hansenLoss18_21, {palette:['#ffff00']},
-  'Hansen reference loss 2018-2021', false);
-Map.addLayer(hansenLoss22_24, {palette:['#00ffff']},
-  'Hansen reference loss 2022-2024', false);
+var hansenLoss2021_2025 = lossYear.gte(21).and(lossYear.lte(25))
+  .and(treeCover2000.gte(30)).selfMask().clip(roi);
+Map.addLayer(hansenLoss2001_2010, {palette:['#ffff00']},
+  'Hansen reference loss 2001-2010', false);
+Map.addLayer(hansenLoss2011_2020, {palette:['#00ffff']},
+  'Hansen reference loss 2011-2020', false);
+Map.addLayer(hansenLoss2021_2025, {palette:['#ff00ff']},
+  'Hansen reference loss 2021-2025', false);
 
 // ======================== AREA STATISTICS =============================
 function areaHa(mask, label) {
-  var result = ee.Image.pixelArea().updateMask(mask).reduceRegion({
-    reducer: ee.Reducer.sum(),
-    geometry: roi,
-    scale: exportScale,
-    maxPixels: 1e13,
-    tileScale: 4
-  });
+  var result = ee.Image.pixelArea().rename('area').updateMask(mask)
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: roi,
+      scale: exportScale,
+      maxPixels: 1e13,
+      tileScale: 4
+    });
   var ha = ee.Number(result.get('area')).divide(10000);
   print(label + ' (ha)', ha);
   return ha;
 }
+historicalYears.forEach(function(year) {
+  areaHa(forestMaps[year].eq(1), 'Classified forest area ' + year);
+});
+intervals.forEach(function(pair) {
+  var key = pair[0] + '_' + pair[1];
+  areaHa(lossMaps[key], 'ML forest loss ' + key);
+});
 
-areaHa(forest2018.eq(1), 'Classified forest area 2018');
-areaHa(forest2021.eq(1), 'Classified forest area 2021');
-areaHa(forest2024.eq(1), 'Classified forest area 2024');
-areaHa(forest2026.eq(1), 'Classified forest area 2026');
-areaHa(loss18_21, 'ML forest loss 2018-2021');
-areaHa(loss21_24, 'ML forest loss 2021-2024');
-areaHa(loss24_26, 'ML forest loss 2024-2026');
-
-// ======================== FUTURE RISK MODEL ============================
-// Use Hansen tree cover >=30% in 2000 as the historical forest cohort.
-// lossYear: 18=2018, 19=2019, ... 21=2021, 24=2024, 25=2025.
-// Train labels: forest present at start of 2018; loss 2019-2021=1;
-// no loss through 2021=0. Use 2018 predictors.
+// ======================== SUSCEPTIBILITY MODEL ========================
+// Hansen is only available from 2001. Train on the 2000 forest cohort
+// still present at start-2011; predict loss in 2011-2013 using 2010
+// Landsat features. Temporal validation: start-2016 forest cohort and
+// loss during 2016-2018 using 2015 features. Predict remaining mapped
+// 2000 forest cohort with 2025 features for the 2026-2028 outlook.
 var validLand = dataMask.eq(1);
-var baselineForest2018 = treeCover2000.gte(30)
-  .and(lossYear.eq(0).or(lossYear.gte(19)))
+var baselineForest2010 = treeCover2000.gte(30)
+  .and(lossYear.eq(0).or(lossYear.gte(11)))
   .and(validLand);
-
 var targetTrain = ee.Image(0)
-  .where(lossYear.gte(19).and(lossYear.lte(21)), 1)
-  .rename('risk')
-  .updateMask(baselineForest2018);
-
-var riskTrainingImage = f2018.addBands(targetTrain);
-
-var riskSamples = riskTrainingImage.stratifiedSample({
+  .where(lossYear.gte(11).and(lossYear.lte(13)), 1)
+  .rename('risk').updateMask(baselineForest2010);
+var riskSamples = features[2010].addBands(targetTrain).stratifiedSample({
   numPoints: samplePerClass,
   classBand: 'risk',
   region: roi,
@@ -292,13 +251,10 @@ var riskSamples = riskTrainingImage.stratifiedSample({
   geometries: true,
   tileScale: 4
 });
-
-print('Risk training samples', riskSamples.size());
-
+print('Risk training samples (2011-2013 target)', riskSamples.size());
 var riskSplit = riskSamples.randomColumn('rand', randomSeed + 10);
 var riskTrain = riskSplit.filter(ee.Filter.lt('rand', 0.8));
 var riskInternalTest = riskSplit.filter(ee.Filter.gte('rand', 0.8));
-
 var riskRF = ee.Classifier.smileRandomForest({
   numberOfTrees: 250,
   minLeafPopulation: 2,
@@ -309,26 +265,19 @@ var riskRF = ee.Classifier.smileRandomForest({
   classProperty: 'risk',
   inputProperties: featureBands
 });
-
 var internalPred = riskInternalTest.classify(riskRF);
 var internalMatrix = internalPred.errorMatrix('risk','classification');
 print('RISK internal confusion matrix', internalMatrix);
 print('RISK internal accuracy', internalMatrix.accuracy());
-print('RISK internal producer accuracy', internalMatrix.producersAccuracy());
-print('RISK internal consumer accuracy', internalMatrix.consumersAccuracy());
 
-// Temporal holdout: forest at start of 2021; loss during 2022-2024.
-// Evaluate model trained on 2018 samples using 2021 features.
-var baselineForest2021 = treeCover2000.gte(30)
-  .and(lossYear.eq(0).or(lossYear.gte(22)))
+// Temporal validation: forest at start-2016, subsequent loss 2016-2018.
+var baselineForest2015 = treeCover2000.gte(30)
+  .and(lossYear.eq(0).or(lossYear.gte(16)))
   .and(validLand);
-
 var targetValidation = ee.Image(0)
-  .where(lossYear.gte(22).and(lossYear.lte(24)), 1)
-  .rename('risk')
-  .updateMask(baselineForest2021);
-
-var validationSamples = f2021.addBands(targetValidation)
+  .where(lossYear.gte(16).and(lossYear.lte(18)), 1)
+  .rename('risk').updateMask(baselineForest2015);
+var validationSamples = features[2015].addBands(targetValidation)
   .stratifiedSample({
     numPoints: samplePerClass,
     classBand: 'risk',
@@ -340,33 +289,15 @@ var validationSamples = f2021.addBands(targetValidation)
     geometries: true,
     tileScale: 4
   });
-
 var temporalPred = validationSamples.classify(riskRF);
 var temporalMatrix = temporalPred.errorMatrix('risk','classification');
-print('TEMPORAL validation confusion matrix (2022-2024)', temporalMatrix);
+print('TEMPORAL validation confusion matrix (2016-2018)', temporalMatrix);
 print('TEMPORAL validation accuracy', temporalMatrix.accuracy());
 print('TEMPORAL validation producer accuracy', temporalMatrix.producersAccuracy());
 print('TEMPORAL validation consumer accuracy', temporalMatrix.consumersAccuracy());
 
-// Refit on the full 2018 training sample after evaluation.
-var finalRiskRF = ee.Classifier.smileRandomForest({
-  numberOfTrees: 250,
-  minLeafPopulation: 2,
-  bagFraction: 0.7,
-  seed: randomSeed + 10
-}).train({
-  features: riskSamples,
-  classProperty: 'risk',
-  inputProperties: featureBands
-});
-
-// Predict susceptibility for 2026-2028 using 2026 sensor features.
-// Limit to the 2000 forest cohort with no Hansen loss through 2025.
-// This deliberately excludes post-2000 regrowth from the risk denominator.
-var forestRemainingAt2026 = treeCover2000.gte(30)
-  .and(lossYear.eq(0))
-  .and(validLand);
-
+// Probability output for relative susceptibility. Class order assumes
+// labels 0 and 1 are both present; inspect sample counts / errors.
 var riskProbabilityClassifier = ee.Classifier.smileRandomForest({
   numberOfTrees: 250,
   minLeafPopulation: 2,
@@ -377,115 +308,49 @@ var riskProbabilityClassifier = ee.Classifier.smileRandomForest({
   classProperty: 'risk',
   inputProperties: featureBands
 });
-
-var riskProb = f2026.classify(riskProbabilityClassifier)
-  .arrayGet([1])
-  .rename('risk_probability')
-  .updateMask(forestRemainingAt2026);
-
+var forestRemaining2025 = treeCover2000.gte(30)
+  .and(lossYear.eq(0)).and(validLand);
+var riskScore = features[2025].classify(riskProbabilityClassifier)
+  .arrayGet([1]).rename('relative_susceptibility')
+  .updateMask(forestRemaining2025);
 var riskClass = ee.Image(0)
-  .where(riskProb.gte(0.25), 1)
-  .where(riskProb.gte(0.50), 2)
-  .where(riskProb.gte(0.75), 3)
-  .rename('risk_class')
-  .updateMask(forestRemainingAt2026);
-
-Map.addLayer(riskProb, {
+  .where(riskScore.gte(0.25), 1)
+  .where(riskScore.gte(0.50), 2)
+  .where(riskScore.gte(0.75), 3)
+  .rename('risk_class').updateMask(forestRemaining2025);
+Map.addLayer(riskScore, {
   min: 0, max: 1,
   palette: ['#1a9850','#fee08b','#f46d43','#a50026']
-}, 'Predicted deforestation susceptibility 2026-2028', true);
-
+}, 'Relative deforestation susceptibility 2026-2028', true);
 Map.addLayer(riskClass, {
   min: 0, max: 3,
   palette: ['#1a9850','#fee08b','#f46d43','#a50026']
 }, 'Risk classes: low to very high', false);
-
 areaHa(riskClass.eq(3), 'Very-high susceptibility forest area');
 
 // ======================== EXPORTS ====================================
-function exportImage(image, description, scale) {
+function exportImage(image, description) {
   Export.image.toDrive({
     image: image,
     description: description,
     folder: exportFolder,
     region: roi,
-    scale: scale || exportScale,
+    scale: exportScale,
     maxPixels: 1e13,
     fileFormat: 'GeoTIFF'
   });
 }
-
 if (runExports) {
-  exportImage(forest2018, 'Forest_classification_2018');
-  exportImage(forest2021, 'Forest_classification_2021');
-  exportImage(forest2024, 'Forest_classification_2024');
-  exportImage(forest2026, 'Forest_classification_2026');
-  exportImage(loss18_21.unmask(0), 'ML_forest_loss_2018_2021');
-  exportImage(loss21_24.unmask(0), 'ML_forest_loss_2021_2024');
-  exportImage(loss24_26.unmask(0), 'ML_forest_loss_2024_2026');
-  exportImage(riskProb, 'Deforestation_susceptibility_2026_2028');
+  historicalYears.forEach(function(year) {
+    exportImage(forestMaps[year], 'Forest_classification_' + year);
+  });
+  intervals.forEach(function(pair) {
+    var key = pair[0] + '_' + pair[1];
+    exportImage(lossMaps[key].unmask(0), 'ML_forest_transition_' + key);
+  });
+  exportImage(riskScore, 'Relative_deforestation_susceptibility_2026_2028');
   exportImage(riskClass, 'Deforestation_risk_classes_2026_2028');
 }
 
-
-
-// ======================== OPTIONAL USER-UPLOADED FEATURE ASSETS =======
-// Upload preprocessed multiband GeoTIFFs to Earth Engine Assets.
-// Required bands and units must match `featureBands` exactly.
-// Leave IDs empty to use the automatic polygon/Sentinel workflow.
-//
-// For a single new-date feature image, set uploadedNewAssetId.
-// For historical change, provide BOTH old and new feature-image assets.
-// This is not for raw RGB images: inputs must already contain all
-// Sentinel-1/Sentinel-2/terrain features listed in featureBands.
-
-var uploadedOldAssetId = '';
-var uploadedNewAssetId = '';
-var uploadedSingleAssetId = '';
-
-if (uploadedSingleAssetId !== '') {
-  var uploadedSingle = ee.Image(uploadedSingleAssetId)
-    .select(featureBands)
-    .clip(roi);
-
-  var uploadedForest = uploadedSingle.classify(forestRF)
-    .rename('forest_class');
-
-  var uploadedRisk = uploadedSingle
-    .classify(riskProbabilityClassifier)
-    .arrayGet([1])
-    .rename('risk_probability');
-
-  Map.addLayer(uploadedForest, forestVis,
-    'Uploaded image: forest classification');
-  Map.addLayer(uploadedRisk, {
-    min: 0, max: 1,
-    palette: ['#1a9850','#fee08b','#f46d43','#a50026']
-  }, 'Uploaded image: risk susceptibility');
-}
-
-if (uploadedOldAssetId !== '' && uploadedNewAssetId !== '') {
-  var uploadedOld = ee.Image(uploadedOldAssetId)
-    .select(featureBands)
-    .clip(roi);
-  var uploadedNew = ee.Image(uploadedNewAssetId)
-    .select(featureBands)
-    .clip(roi);
-
-  var uploadedOldForest = uploadedOld.classify(forestRF);
-  var uploadedNewForest = uploadedNew.classify(forestRF);
-
-  var uploadedLoss = uploadedOldForest.eq(1)
-    .and(uploadedNewForest.eq(0))
-    .selfMask();
-
-  Map.addLayer(uploadedOldForest, forestVis,
-    'Uploaded older image classification', false);
-  Map.addLayer(uploadedNewForest, forestVis,
-    'Uploaded newer image classification', false);
-  Map.addLayer(uploadedLoss, {palette:['red']},
-    'Uploaded-image deforestation change');
-}
-
-print('SCRIPT INITIALIZED. Inspect Console, map layers and Tasks.');
-print('If a collection has zero scenes, adjust the date window or AOI.');
+print('SCRIPT INITIALIZED. Inspect scene counts, sample counts, Console, map and Tasks.');
+print('If a year has zero scenes or missing pixels, check AOI/date window and cloud coverage.');

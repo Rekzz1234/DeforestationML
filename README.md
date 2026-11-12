@@ -1,25 +1,18 @@
-# Western Ghats Deforestation Monitoring
+# Western Ghats Deforestation Monitoring (1990–2025)
 
-An Earth Engine project for forest-cover classification, historical deforestation detection, and future deforestation susceptibility mapping using Sentinel-1 SAR, Sentinel-2 optical imagery, and Random Forest.
+An Earth Engine project for long-term forest-cover classification, historical forest-to-nonforest change detection, and a separate relative deforestation-susceptibility outlook. The main historical workflow uses Landsat Collection 2 Level-2 surface reflectance at 30 m, with Random Forest classification.
 
-> **Project status:** Initial executable Google Earth Engine implementation. The workflow requires execution and validation in the user's Earth Engine account before results can be reported.
+> **Project status:** Updated implementation. It still must be run, checked and validated in the user's Earth Engine account before any results or accuracy values can be reported.
 
-## Objectives
+## Study period and imagery
 
-1. Classify forest and non-forest cover in a user-selected study area.
-2. Compare historical observations and map forest-to-non-forest transitions.
-3. Estimate forest-loss susceptibility for a future planning horizon.
-4. Export GeoTIFF maps and area statistics.
-5. Support analysis of new user-drawn regions and, with correctly prepared assets, uploaded imagery.
+Historical comparison years: **1990, 2000, 2010, 2020 and 2025**.
 
-## Study area and periods
+Additional support composites:
+- **2015:** temporal validation inputs for the susceptibility model.
+- **2021:** classifier training inputs aligned to ESA WorldCover 2021 reference labels.
 
-- Initial study region: Western Ghats, Tamil Nadu (user-drawn polygon).
-- Historical comparison: 2018, 2021, 2024.
-- Current observation/risk input: 2026 composite.
-- Prospective susceptibility horizon: 2026–2028.
-
-The default composite window is January–April for comparable seasonal observations.
+All composites use January 1–April 30 for seasonal comparability. Landsat 5/7 are used before 2013; Landsat 8/9 are used from 2013 onward. The script harmonizes band names and applies Collection 2 surface-reflectance scaling and QA masking. Cross-sensor spectral response differences are not fully removed and must be acknowledged.
 
 ## Repository layout
 
@@ -27,97 +20,77 @@ The default composite window is January–April for comparable seasonal observat
 .
 ├── README.md
 ├── LICENSE
-├── .gitignore
 ├── CONTRIBUTING.md
 ├── docs/
+│   ├── architecture.md
+│   ├── dataset-workflow.md
+│   ├── methodology.md
+│   ├── model-evaluation.md
+│   └── two-day-plan.md
 ├── gee/
 │   ├── main.js
-│   ├── README.md
-│   └── modules/                 # reserved for future modular refactor
-├── data/
-│   ├── raw/                     # local inputs; do not commit large imagery
-│   ├── processed/               # local derived data; do not commit large rasters
 │   └── README.md
+├── data/
 ├── outputs/
-│   ├── maps/
-│   ├── statistics/
-│   └── exports/
 ├── reports/
-│   ├── figures/
-│   └── final-report.md
 └── notebooks/
 ```
 
 ## Quick start
 
 1. Open the [Google Earth Engine Code Editor](https://code.earthengine.google.com/).
-2. Activate/register Earth Engine access if required.
-3. Draw a polygon around the selected Western Ghats study area. The imported geometry must be named `geometry`.
-4. Open `gee/main.js`, copy its contents into a new Code Editor script, and click **Run**.
-5. Inspect the Console for image collection scene counts, sample counts, confusion matrices, accuracy values, and area statistics.
-6. Inspect map layers.
-7. Open **Tasks** and run the desired Google Drive GeoTIFF exports.
+2. Draw the study-area polygon and ensure the imported variable is named `geometry`.
+3. Copy all of `gee/main.js` into a new Code Editor script.
+4. Click **Run**. Check the Console for Landsat scene counts, sample counts, confusion matrices and area statistics.
+5. Inspect all map layers. Confirm the composites are not empty and cloud gaps are acceptable.
+6. Open **Tasks** and run the GeoTIFF exports to Google Drive.
 
-Detailed setup is in [`gee/README.md`](gee/README.md). Dataset details are in [`docs/dataset-workflow.md`](docs/dataset-workflow.md).
-
-## Models
+## Models and outputs
 
 ### Model A — forest / non-forest classification
 
-- Inputs: Sentinel-1 VV, VH and VV−VH; Sentinel-2 bands B2, B3, B4, B8, B11, B12; NDVI and NBR; elevation and slope.
-- Reference: ESA WorldCover 2021 classes.
-- Algorithm: Random Forest.
-- Output: binary forest/non-forest raster for each date.
+- Predictors: Landsat blue, green, red, NIR, SWIR1, SWIR2, NDVI, NBR, elevation and slope.
+- Reference: ESA WorldCover 2021 (tree cover and mangroves as forest; selected land-cover classes as non-forest).
+- Training: Landsat 2021 predictors with WorldCover 2021 labels.
+- Application: 1990, 2000, 2010, 2020 and 2025 composites.
+- Output: binary forest/non-forest maps and area estimates.
 
-### Model B — deforestation susceptibility
+### Historical change detection
 
-- Historical training target: Hansen tree-cover loss during 2019–2021 among the eligible baseline forest cohort.
-- Training predictors: 2018 feature composite.
-- Temporal holdout: 2021 predictors and loss during 2022–2024.
-- Prediction predictors: 2026 feature composite.
-- Output: relative susceptibility score and four illustrative risk classes.
+Forest-to-nonforest transitions are mapped for 1990–2000, 2000–2010, 2010–2020 and 2020–2025. The 1990–2000 interval has no Hansen Global Forest Change validation because Hansen's annual loss record begins in 2001.
 
-## Important scientific limitations
+### Model B — relative susceptibility outlook
 
-- WorldCover is a reference map, not perfect ground truth. Report agreement with the reference, not absolute real-world accuracy.
-- The current forest classifier samples labels in the selected AOI and retrains for that AOI. It is not a universal pretrained model.
-- Random pixel train/test splits can inflate accuracy because nearby pixels are spatially correlated. For a stronger study, hold out spatial blocks or an entire geographic region.
-- Hansen Global Forest Change measures stand-replacement tree-cover loss and does not capture every form of degradation or selective logging.
-- The risk model uses a Hansen historical forest cohort and does not fully represent post-2000 regrowth.
-- Risk scores are susceptibility estimates, not calibrated guarantees of future deforestation.
-- The 2026–2028 horizon should be described as a susceptibility outlook. The 2026 input composite is a seasonal snapshot, not a full-year observation.
-- Inspect scene counts, valid-pixel coverage, cloud masking and geographic boundaries before interpreting results.
+- Training predictors: 2010 Landsat composite.
+- Positive target: Hansen loss during 2011–2013 among the eligible circa-2000 forest cohort.
+- Temporal validation: 2015 predictors and Hansen loss during 2016–2018.
+- Prediction input: 2025 Landsat composite.
+- Outlook: relative susceptibility for 2026–2028, masked to the remaining mapped circa-2000 forest cohort.
 
-## Reproducibility
+The score is not a calibrated probability or a guarantee of future clearing. This initial Hansen-based risk workflow excludes post-2000 regrowth from its eligible forest cohort.
 
-Record the following for every run:
+## Scientific limitations
 
-- Study-area polygon or asset ID
-- Run date
-- Composite date window
-- Earth Engine dataset IDs / versions
-- Sampling parameters and random seed
-- Model parameters
-- Confusion matrices and metrics
-- Export scale and projection
-- Any manual corrections
+- WorldCover is a reference map, not perfect ground truth. Report agreement with reference labels rather than absolute real-world accuracy.
+- The classifier is trained in the selected AOI and then applied retrospectively. It is not a universal pretrained model.
+- A 2021-trained model applied to 1990 imagery can be affected by sensor differences, historical land-cover spectral differences and landscape changes.
+- Landsat 5/7 use LEDAPS surface reflectance processing, while Landsat 8/9 use LaSRC; common band naming and scaling do not eliminate all sensor differences.
+- Landsat 7 has scan-line-corrector gaps after 2003. Median composites may reduce but not necessarily eliminate missing pixels.
+- Random pixel train/test splits can overstate accuracy due to spatial autocorrelation. Spatial-block validation is preferable.
+- Hansen measures stand-replacement tree-cover loss and does not capture every form of degradation or selective logging. Its loss record begins in 2001.
+- Hansen's 2000 tree-cover cohort does not fully represent post-2000 regrowth.
+- Risk scores are relative susceptibility estimates, not calibrated probabilities.
+- Inspect scene counts, valid-pixel coverage, cloud masking and boundaries before interpreting results.
 
-Use `docs/model-evaluation.md` as the reporting checklist.
+## Reproducibility checklist
 
-## Data and licensing
+Record the AOI, run date, seasonal window, dataset IDs, sampling settings, random seed, classifier parameters, confusion matrices, area estimates, export scale and any manual corrections. See `docs/model-evaluation.md`.
 
-Satellite and reference datasets retain their respective provider terms and attribution requirements. Do not commit large raw satellite imagery or private Earth Engine asset identifiers to this repository. See [`data/README.md`](data/README.md).
+## Data sources
 
-## Roadmap
+- Landsat Collection 2 Level-2: USGS / Google Earth Engine.
+- ESA WorldCover 2021: European Space Agency.
+- Hansen Global Forest Change v1.13 (2000–2025): Hansen/UMD/Google/USGS/NASA.
+- SRTM elevation: USGS.
 
-- [x] Initial end-to-end Earth Engine script
-- [x] Sentinel-1 and Sentinel-2 feature fusion
-- [x] Forest classification and historical change mapping
-- [x] Temporal risk-model validation workflow
-- [ ] Run and debug on selected Western Ghats AOI
-- [ ] Spatial-block validation
-- [ ] Add roads / settlement accessibility predictors
-- [ ] Add post-2000 regrowth handling
-- [ ] Refactor Earth Engine code into reusable modules
-- [ ] Add Python GeoTIFF upload/preprocessing workflow
-- [ ] Build a user-facing interface and downloadable report
+See `docs/dataset-workflow.md` for Earth Engine IDs and links. Follow dataset attribution and license requirements.

@@ -1,30 +1,23 @@
 # Google Earth Engine implementation
 
-## Main script
-
-`main.js` is the current standalone script. It is designed to be copied into the Google Earth Engine Code Editor.
+`main.js` is a standalone Landsat 1990–2025 script.
 
 ## Run
 
-1. Open https://code.earthengine.google.com/
+1. Open https://code.earthengine.google.com/.
 2. Draw a polygon and ensure the imported variable is named `geometry`.
 3. Copy all of `main.js` into the Code Editor.
 4. Click Run.
-5. Inspect Console, map layers and Tasks.
-6. Run export tasks to Google Drive.
+5. Check the Console for per-year scene counts, training sample counts, confusion matrices and area statistics.
+6. Inspect each historical map and transition layer for cloud gaps or missing pixels.
+7. Run the Drive exports in the Tasks panel.
 
-## New region
+## Important
 
-Redraw the geometry and rerun. The forest classifier samples WorldCover labels in that region and trains a regional classifier.
-
-## Uploaded assets
-
-At the bottom of `main.js`, set one of:
-- `uploadedSingleAssetId` for one prepared feature image.
-- `uploadedOldAssetId` and `uploadedNewAssetId` for two prepared dates.
-
-The image must contain the 13 feature bands listed in the root README. Raw RGB images are not compatible without preprocessing.
-
-## Modules directory
-
-`modules/` is reserved for a future refactor. The Code Editor does not automatically resolve local repository imports. If modularizing, publish modules as Earth Engine scripts/assets or use a local Earth Engine Python workflow.
+- Main comparison years: 1990, 2000, 2010, 2020 and 2025.
+- Support years: 2015 (risk validation) and 2021 (WorldCover training).
+- All composites use Jan–Apr.
+- The classifier is trained from WorldCover 2021 labels and applied retrospectively.
+- Hansen loss begins in 2001; it cannot validate 1990–2000.
+- Reduce `samplePerClass` to 500 if the AOI is small or sampling fails.
+- If a collection has no scenes, inspect the AOI, year, season and collection availability before changing the model.
