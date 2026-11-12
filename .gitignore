@@ -1,0 +1,32 @@
+# Satellite imagery and large generated files
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+outputs/maps/*
+!outputs/maps/.gitkeep
+outputs/statistics/*
+!outputs/statistics/.gitkeep
+outputs/exports/*
+!outputs/exports/.gitkeep
+reports/figures/*
+!reports/figures/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Local/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Credentials and private configuration
+.env
+*.key
+service-account*.json
+credentials*.json
